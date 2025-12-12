@@ -51,6 +51,13 @@ MACRO_END
 #define COLUMN     (POS.begin - POS.offset + 1)
 #define TOKENS     (s->tokens)
 #define TOKENS_BUF (TOKENS.items)
+#define AST        (s->ast)
+#define EXPRS      (AST.expressions)
+#define EXPRS_BUF  (EXPRS.items)
+#define VALUES     (AST.value_exprs)
+#define VALUES_BUF (VALUES.items)
+#define INFIXS     (AST.infix_exprs)
+#define INFIXS_BUF (INFIXS.items)
 
 #define WHITESPACES " \n\r\t"
 #define DIGITS      "0123456789"
@@ -61,12 +68,18 @@ typedef struct string {
     char   *items;
 } string;
 
+///////////
+// Position
+
 typedef struct Position {
     size_t begin;
     size_t end;
     size_t offset;
     size_t line;
 } Position;
+
+/////////
+// Tokens
 
 typedef enum TokenKind {
     TOKEN_UNDEFINED,
@@ -87,22 +100,90 @@ typedef struct Tokens {
     Token  *items;
 } Tokens;
 
-typedef struct State {
-    string   path;
-    string   text;
+/////////////////////////////
+// Abstract Syntax Tree (AST)
+
+typedef enum ExprKind {
+    EXPR_UNDEFINED,
+    EXPR_INFIX,
+} ExprKind;
+
+typedef struct Expression {
+    ExprKind kind;
     Position position;
-    Tokens   tokens;
+    size_t   index;
+} Expression;
+
+typedef struct Expressions {
+    size_t     capacity;
+    size_t     length;
+    Expression *items;
+} Expressions;
+
+typedef struct ValueExpr {
+    size_t capacity;
+    size_t length;
+    char   *items;
+} ValueExpr;
+
+typedef struct ValueExprs {
+    size_t    capacity;
+    size_t    length;
+    ValueExpr *items;
+} ValueExprs;
+
+typedef enum InfixKind {
+    INFIX_UNDEFINED,
+    INFIX_PLUS,
+    INFIX_MINUS,
+} InfixKind;
+
+typedef struct InfixExpr {
+    InfixKind kind;
+    size_t    l_expr;
+    size_t    r_expr;
+} InfixExpr;
+
+typedef struct InfixExprs {
+    size_t    capacity;
+    size_t    length;
+    InfixExpr *items;
+} InfixExprs;
+
+typedef struct AST {
+    Exprs    expressions;   // dynamic array of expressions (value and infix operations)
+    Values   value_exprs;   // dynamic array of values
+    Infixs   infix_exprs;   // dynamic array of infix operations
+} AST;
+
+/////////////////
+// Compiler State
+
+typedef struct State {
+    string   path;          // path to source code (".aec" extensions)
+    string   text;          // text of source code
+    Position position;      // for lexer current position of token and parser last position
+    Tokens   tokens;        // dynamic array of tokens
+    size_t   token_index;   // index into tokens for parsing AST
+    AST      ast;           // Abstract Syntax Tree
 } State;
 
-string str_from_cstr(char *cstr);
-State new_state(string path);
-void  del_state(State *s);
-bool  lex_ends(State *s, size_t offset);
-char  lex_peek(State *s, size_t offset);
-bool  lex_is(State *s, size_t offset, char *str);
-bool  lex_has(State *s, size_t offset, char *c);
-Token lex_get_token(State *s);
-void  lex_tokenise(State *s);
+string     str_from_cstr(char *cstr);
+State      new_state(string path);
+void       del_state(State *s);
+bool       lex_ends(State *s, size_t offset);
+char       lex_peek(State *s, size_t offset);
+bool       lex_is(State *s, size_t offset, char *str);
+bool       lex_has(State *s, size_t offset, char *c);
+Token      lex_get_token(State *s);
+void       lex_tokenise(State *s);
+bool       tokens_end(State *s, size_t offset);
+bool       expect_kind(State *s, size_t offset, TokenKind kind);
+bool       expect_kinds(State *s, size_t offset, TokenKind *kinds, size_t count);
+Expression parse_expression(State *s);
+ValueExpr  parse_value_expr(State *s);
+InfixExpr  parse_infix_expr(State *s);
+void       parse(State *s);
 
 string str_from_cstr(char *cstr) {
     string str = STRING_EMPTY;
@@ -131,19 +212,50 @@ State new_state(string path) {
     fread(buffer.items, 1, buffer.length, pf);
     fclose(pf);
     return (State){
-        .path     = path, 
-        .text     = buffer, 
-        .position = (Position){.begin=0, .end=0, .offset=0, .line=1}, 
-        .tokens   = DA_EMPTY(Tokens)
+        .path        = path,
+        .text        = buffer,
+        .position    = (Position){.begin=0, .end=0, .offset=0, .line=1},
+        .tokens      = DA_EMPTY(Tokens),
+        .token_index = 0,
+        .ast         = {
+            .expressions = DA_EMPTY(Exprs),
+            .value_exprs = DA_EMPTY(Values),
+            .infix_exprs = DA_EMPTY(Infixs),
+        },
     };
 }
 
 void del_state(State *s) {
-    free(s->text.items);
-    s->text = STRING_EMPTY;
+    if (TEXT_BUF) {
+        free(TEXT_BUF);
+    }
+    TEXT = STRING_EMPTY;
 
-    free(s->tokens.items);
-    s->tokens = DA_EMPTY(Tokens);
+    if (TOKENS_BUF) {
+        free(TOKENS_BUF);
+    }
+    TOKENS = DA_EMPTY(Tokens);
+
+    if (EXPRS_BUF) {
+        free(EXPRS_BUF);
+    }
+    EXPRS = DA_EMPTY(Expressions);
+
+    if (VALUES_BUF) {
+        for (size_t i = 0; i < DA_LEN(VALUES_BUF); i++) {
+            ValueExpr value_expr = *DA_GET(VALUES, i);
+            if (value_expr.items) {
+                free(value_expr.items);
+            }
+        }
+        free(VALUES_BUF);
+    }
+    VALUES = DA_EMPTY(Values);
+
+    if (INFIXS_BUF) {
+        free(INFIXS_BUF);
+    }
+    INFIXS = DA_EMPTY(Infixs);
 }
 
 bool lex_ends(State *s, size_t offset) {
@@ -229,11 +341,38 @@ void lex_tokenise(State *s) {
     }
 }
 
+bool tokens_end(State *s, size_t offset) {
+    return DA_LEN(TOKENS) > CUR + offset;
+}
+
+bool expect_kind(State *s, size_t offset, TokenKind kind) {
+    return !tokens_end(s, offset) && DA_GET(TOKENS).kind == kind;
+}
+
+bool expect_kinds(State *s, size_t offset, TokenKind *kinds, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (expect_kind(s, offset + i, kinds[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+Expression parse_expression(State *s) {}
+
+ValueExpr parse_value_expr(State *s) {}
+
+InfixExpr parse_infix_expr(State *s) {}
+
+void parse(State *s) {}
+
 int main() {
     string path = str_from_cstr("test.aec");
     State s = new_state(path);
     lex_tokenise(&s);
+    parse(&s);
     printf("tokens: %zu\n", DA_LEN(s.tokens));
+    printf("expressions: %zu\n", DA_LEN(s.ast.expressions));
     del_state(&s);
     return 0;
 }
